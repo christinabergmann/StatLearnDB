@@ -1,0 +1,154 @@
+---
+title: "Some more analyses for the StatLearn MetaAnalysis"
+author: "Alexis Black & Christina Bergmann"
+date: "2/1/2017"
+output: html_document
+---
+
+## Set-up
+
+This is the same as in the main analyses to create comparable datasets
+```{r SetUp, echo = FALSE}
+
+library(tidyverse)
+
+#setwd("~/Dropbox/StatLearnDB") #If you need to set the working directory
+
+
+library(metafor)
+
+#### Get data ####
+
+#run Effect-size script first
+source("scripts/calculateES.R")
+
+#### Some clean-up ####
+db <-
+  db %>% 
+  mutate(StimuliType = ifelse(test_lang_program=="natural", "1", "0")) %>% 
+  mutate(StimuliType = as.factor(StimuliType)) %>% 
+  mutate(age.C = mean_age_1-mean(mean_age_1, na.rm=TRUE)) %>% 
+  rename(gender = gender_1)
+
+
+db$collapse <- paste(db$study_ID, db$expt_num, db$same_infant, sep = "_")
+
+for(independent in unique(db$collapse)){
+  if(length(db[db$collapse==independent])>1){
+    sub = db[db$collapse==independent, ]
+    sub$d_calc <- median(sub$d_calc)
+    sub$d_var_calc <- median(sub$d_var_calc)
+    sub$g_calc <- median(sub$g_calc)
+    sub$g_var_calc <- median(sub$g_var_calc)
+    sub$corr_imputed <- median(sub$corr_imputed)
+    db <- db[!(db$collapse==independent),]
+    db <- rbind(db, sub[1,])
+  }
+}
+
+
+
+
+#### Create subsets ####
+
+# direct replications only, as coded in the spreadsheet
+
+db_DR <-
+  db %>% 
+  filter(DirectRep == "yes")
+```
+# What could we look at in the future?
+
+- What are some of the potential moderators?
+  + **familiarization time**
+  + frequency_balanced (based on cursory look, might be worth exploring)
+  + ForwardTP_nonword
+  + number_syllables
+  + duration_syllables
+  + **gender**
+  
+- Obviously, we won't have enough power to look at all of these. How do we choose?
+
+#Gender
+```{r Gender}
+
+
+# Look at Gender
+rma_gender=rma.mv(g_calc, g_var_calc, mods=gender, data=db, random = ~ 1|short_cite)
+summary(rma_gender)
+
+# Let's take a look at this graphically
+dat <-
+  db %>% 
+  rename(cite = short_cite,
+         yi = g_calc,
+         vi = g_var_calc) %>% 
+  mutate(study_ref = paste(cite, expt_num, same_infant, sep=',')) %>% 
+  filter(gender >.01) %>% 
+  arrange(desc(gender))
+dat$se = sqrt(dat$vi)
+dat$lowerci = (-1.96*dat$se)+dat$yi
+dat$upperci = (1.96*dat$se)+dat$yi
+
+ggplot(dat, aes(y=reorder(study_ref, -gender), x=yi, xmin=lowerci, xmax=upperci))+
+  geom_point(aes(color = gender))+
+  geom_errorbarh(height=.1)+
+  scale_x_continuous(limits=c(-1.5,1.5), name='Standardized Mean Difference (g)')+
+  ylab('Reference')+
+  geom_vline(xintercept=0, color='grey', linetype='dashed')+
+  geom_vline(xintercept=0.65, color='black', linetype='dashed')
+
+```
+
+
+#Different Cues
+
+```{r}
+db_stress <-
+  db %>% 
+  filter(additional_cue == c("stress", "intensity", "duration"))
+rma_stress <- rma.mv(g_calc, g_var_calc, mods = ~factor(cue_conflict_TP)-1, data = db_stress, random = ~1|short_cite)
+summary(rma_stress)
+```
+
+Before I get too excited - only 6 rows of data?? That makes no sense. Why would that happen? Ok, let's subset a different way.
+
+```{r}
+db_stress <- subset(db, additional_cue == "stress" | additional_cue == "intensity" |
+                      additional_cue == "duration" | additional_cue == "prime, stress")
+rma_stress <- rma.mv(g_calc, g_var_calc, mods = ~factor(cue_conflict_TP)-1, data = db_stress, random = ~1|short_cite)
+summary(rma_stress)
+```
+
+And, not even close. This is something to bring up in the discussion. 
+
+#Familiarization Duration
+```{r}
+rma_duration <- rma.mv(g_calc, g_var_calc, mods = familiarization_time, 
+                       data = db, 
+                       random = ~1|short_cite)
+summary(rma_duration)
+```
+
+Would be good to look at the interactions of all of these things though ...
+
+# Take out the direct reps, bc maybe they skew what would otherwise be a familiarity preference in the rest of the data
+
+```{r}
+db_nonDR <-
+  db %>% 
+  filter(DirectRep == "no")
+
+rma_nonDR <- rma.mv(g_calc, g_var_calc,  
+                       data = db_nonDR, 
+                       random = ~1|short_cite)
+summary(rma_nonDR)
+```
+
+
+
+
+## Future ideas
+- I'd like to explore the studies demonstrating a familiarity preference. Are they a unique class? Or is it 'predictable' random variation around the mean? Given the outliers in our funnel plots and the extreme degree of heterogeneity, I wonder if there are multiple things going on (rather, I think there are multiple things going on, can we figure out what they are?)
+
+

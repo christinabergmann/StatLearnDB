@@ -1,0 +1,451 @@
+---
+title: "Working through the StatLearn MetaAnalysis"
+author: "Alexis Black & Christina Bergmann"
+date: "2/1/2017"
+output: html_document
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, tidy = TRUE)
+```
+
+## Set-up
+- The first thing to do is get the workspace set up, and data loaded and cleaned up
+```{r SetUp, echo = FALSE}
+#Plotting, data wrangling
+library(tidyverse)
+
+#meta analysis
+library(metafor)
+
+#### Get data ####
+
+#run Effect-size script first
+source("scripts/calculateES.R")
+
+#### Some clean-up ####
+db <-
+  db %>% 
+  mutate(StimuliType = ifelse(test_lang_program=="natural", "1", "0")) %>% 
+  mutate(StimuliType = as.factor(StimuliType)) %>% 
+  mutate(age.C = mean_age_1-mean(mean_age_1, na.rm=TRUE)) %>% 
+  mutate(familiarization = familiarization_time-mean(familiarization_time, na.rm=TRUE)) %>% 
+  rename(gender = gender_1)
+```
+
+
+## Collapse over non-independent rows
+
+When two or more rows contain data from the same infants, those are no longer independent. To make up for this, we take the median (which if there are 2 rows defaults to the average) effect size. Note that analyses based on t-values (see replicability analyses) should check whether this way we lose significant t-values.
+```{r CollapseNonIndependent, echo = FALSE}
+db$collapse <- paste(db$study_ID, db$expt_num, db$same_infant, sep = "_")
+
+for(independent in unique(db$collapse)){
+  if(length(db[db$collapse==independent])>1){
+    sub = db[db$collapse==independent, ]
+    sub$d_calc <- median(sub$d_calc)
+    sub$d_var_calc <- median(sub$d_var_calc)
+    sub$g_calc <- median(sub$g_calc)
+    sub$g_var_calc <- median(sub$g_var_calc)
+    sub$corr_imputed <- median(sub$corr_imputed)
+    db <- db[!(db$collapse==independent),]
+    db <- rbind(db, sub[1,])
+  }
+}
+```
+
+## The Meta-analysis
+## Starting with Direct Replications
+
+We defined a direct replication as any study that used a continuous stream that could only be segmented via transitional probabilities (i.e. no other cue either in tandem with or in contrast to TPs), and where there was no fundamental change to the experimental protocol. For example, experiments that consist of a priming period prior to familiarization were not included as direct replications, nor were experiments that invovled a test using novel tokens or sentence frames, rather than test items extracted directly from the speech stream. 
+
+```{r Subsets}
+#### Create subsets ####
+
+# direct replications only, as coded in the spreadsheet
+
+db_DR <-
+  db %>% 
+  filter(DirectRep == "yes")
+```
+
+
+```{r}
+#### Random effect model direct replications ####
+
+rma_DR <- rma.mv(g_calc, g_var_calc, data = db_DR, random = ~ 1 | short_cite)
+
+summary(rma_DR)
+```
+
+#Plots
+#+ Forest
+```{r ForestPlotDR}
+#forest(rma_DR)
+
+##Borrowing some code to make this a ggplot: 
+#https://sakaluk.wordpress.com/2016/02/16/7-make-it-pretty-plots-for-met#a-analysis/
+
+#Rename a bunch of things for ease
+dat=db_DR
+dat <-
+  dat %>% 
+  rename(cite = short_cite,
+         yi = g_calc,
+         vi = g_var_calc)
+
+#Reorder bibliographic info based on value of g (yi), so effect sizes can be plotted in descending order
+
+dat <-
+  dat %>% 
+  select(cite, expt_num, same_infant, mean_age_1, yi, vi) %>% 
+  mutate(study_ref = paste(cite, expt_num, same_infant, sep=',')) %>% 
+  arrange(desc(yi))
+
+#Get standard errors from variances
+dat$se = sqrt(dat$vi)
+
+#Calculate 95% CI values
+dat$lowerci = (-1.96*dat$se)+dat$yi
+dat$upperci = (1.96*dat$se)+dat$yi
+
+#Themes and plot
+apatheme=theme_bw()+
+  theme(#panel.grid.major=element_blank(),
+        #panel.grid.minor=element_blank(),
+        #panel.border=element_blank(),
+        axis.line=element_line(),
+        text=element_text(family='Times'),
+        legend.position='none')
+p=
+  ggplot(dat, aes(y=reorder(study_ref, -yi), x=yi, xmin=lowerci, xmax=upperci))+
+  #Add data points and color them black
+  geom_point(color = 'black')+
+  #Add 'special' points for the summary estimates, by making them diamond shaped
+#  geom_point(data=subset(dat, tester=='Summary'), color='black', shape=18, size=4)+
+  #add the CI error bars
+  geom_errorbarh(height=.1)+
+  #Specify the limits of the x-axis and relabel it to something more meaningful
+  scale_x_continuous(limits=c(-1.5,1.5), name='Standardized Mean Difference (g)')+
+  #Give y-axis a meaningful label
+  ylab('Reference')+
+  #Add a vertical dashed line indicating an effect size of zero, for reference
+  geom_vline(xintercept=0, color='grey', linetype='dashed')+
+  #Add a vertical line to show mean effect
+  geom_vline(xintercept=0.19, color='black', linetype='dashed')+
+  #Create sub-plots (i.e., facets) based on levels of setting
+  #And allow them to have their own unique axes (so authors don't redundantly repeat)
+  #facet_grid(setting~., scales= 'free', space='free')+
+  #Apply my APA theme
+  apatheme
+
+p
+
+ggsave("figures/ForestPlot_DR.png", p)
+```
+#+ Funnel
+```{r FunnelPlotDR}
+### This code is from: https://sakaluk.wordpress.com/2016/02/16/7-make-it-pretty-plots-for-met#a-analysis/
+#Store the meta-analytic estimate and its standard error from whatever model you run (substitute your own values)
+#rma_DR
+estimate = 0.2055
+se = 0.0965
+
+#Store a vector of values that spans the range from 0
+#to the max value of impression (standard error) in your dataset.
+#Make the increment (the final value) small enough (I choose 0.001)
+#to ensure your whole range of data is captured
+se.seq=seq(0, max(dat$se), 0.001)
+
+#Now, compute vectors of the lower-limit and upper limit values for
+#the 95% CI region, using the range of SE that you generated in the previous step, 
+#and the stored value of your meta-analytic estimate.
+ll95 = estimate-(1.96*se.seq)
+ul95 = estimate+(1.96*se.seq)
+
+#You can do this for a 99% CI region too
+ll99 = estimate-(3.29*se.seq)
+ul99 = estimate+(3.29*se.seq)
+
+#And finally, do the same thing except now calculating the confidence interval
+#for your meta-analytic estimate based on the stored value of its standard error
+meanll95 = estimate-(1.96*se)
+meanul95 = estimate+(1.96*se)
+
+#Now, smash all of those calculated values into one data frame (called 'dfCI').
+#You might get a warning about '...row names were found from a short variable...'
+#You can ignore it.
+dfCI = data.frame(ll95, ul95, ll99, ul99, se.seq, estimate, meanll95, meanul95)
+
+#Now we can actually make the funnel plot.
+#Using your original data-frame, map standard error to your x-axis (for now) and Zr to your y-axis
+fp = ggplot(aes(x = se, y = yi), data = dat) +
+  #Regression line for the FP asymmetry
+  geom_smooth(aes(x = se, y = yi), method = "lm", colour = "darkgrey", alpha = .5, se = FALSE, data = dat) +
+  #Add your data-points to the scatterplot
+  geom_point(size = 2.5, colour="black") +
+  #Give the x- and y- axes informative labels
+  xlab('Standard Error') + ylab('Hedge\'s g')+
+  #Now using the 'dfCI' data-frame we created, plot dotted lines corresponding
+  #to the lower and upper limits of your 95% CI region
+  #And dashed lines corresponding to your 99% CI region
+  #Add lines corresponding to 0 and estimate
+  geom_line(aes(x = se.seq, y = 0), linetype = 'solid', data = dfCI) +
+  geom_line(aes(x = se.seq, y = estimate), linetype = 'dashed', data = dfCI) +
+  geom_line(aes(x = se.seq, y = ll95), linetype = 'dotted', data = dfCI) +
+  geom_line(aes(x = se.seq, y = ul95), linetype = 'dotted', data = dfCI) +
+#  geom_line(aes(x = se.seq, y = ll99), linetype = 'dashed', data = dfCI) +
+#  geom_line(aes(x = se.seq, y = ul99), linetype = 'dashed', data = dfCI) +
+  #Now plot dotted lines corresponding to the 95% CI of your meta-analytic estimate
+  #geom_segment(aes(x = min(se.seq), y = meanll95, xend = max(se.seq), yend = meanll95), linetype='dotted', data=dfCI) +
+  #geom_segment(aes(x = min(se.seq), y = meanul95, xend = max(se.seq), yend = meanul95), linetype='dotted', data=dfCI) +
+  #Reverse the x-axis ordering (se) so that the tip of the funnel will appear
+  #at the top of the figure once we swap the x- and y-axes...
+  scale_x_reverse()+
+  #Specify the range and interval for the tick-marks of the y-axis (Zr);
+  #Choose values that work for you based on your data
+  scale_y_continuous(breaks=seq(-.45,0.8,0.25))+
+  #And now we flip the axes so that SE is on y- and Zr is on x-
+  coord_flip()+
+  #Finally, apply my APA-format theme (see code at end of post).
+  #You could, alternatively, specify theme_bw() instead.
+  apatheme
+
+#Call the pretty funnel plot
+fp
+ggsave("figures/FunnelPlot_DR.pdf")
+
+#This is the "classical" plot from the metafor package
+#funnel(rma_DR)
+```
+
+##Moderators
+
+We look first at age (do infants switch preference or improve with age?), then stimulus type (artificial vs natural speech)
+
+```{r Moderators_DR}
+#The age effect: does infant age affect the slope?
+rma_age_DR <- rma.mv(g_calc, g_var_calc, mods = age.C, data = db_DR, random = ~ 1 | short_cite)
+summary(rma_age_DR)
+
+# Look at Stimulus Type, first do a "typical" moderator test
+rma_stimuli_DR=rma.mv(g_calc, g_var_calc, mods= ~factor(StimuliType), data=db_DR, random = ~ 1|short_cite)
+summary(rma_stimuli_DR)
+
+#Now remove intercept to see which subset is different from 0 
+rma_stimuli_DR_1=rma.mv(g_calc, g_var_calc, mods= ~factor(StimuliType)-1, data=db_DR, random = ~ 1|short_cite)
+summary(rma_stimuli_DR_1)
+
+#Follow-up: Subsets, easier to interpret and write down, conclusions are the same as the previous analysis without intercept
+
+#artificial only, n=11
+rma_stimuli_DR_subset0=rma.mv(g_calc, g_var_calc, data=db_DR, subset = (StimuliType ==0), random = ~ 1|short_cite)
+summary(rma_stimuli_DR_subset0)
+
+#natural only, n=6
+rma_stimuli_DR_subset1=rma.mv(g_calc, g_var_calc, data=db_DR, subset = (StimuliType ==1), random = ~ 1|short_cite)
+summary(rma_stimuli_DR_subset1)
+```
+
+# The whole data-set
+I'll execute the same steps as above, but hide the code for aesthetics.
+```{r AllDataAllAnalyses, echo=FALSE}
+rma_all <- rma.mv(g_calc, g_var_calc, data = db, random = ~ 1 | short_cite)
+
+summary(rma_all)
+
+#forest(rma_all)
+dat=db
+dat <-
+  dat %>% 
+  rename(cite = short_cite,
+         yi = g_calc,
+         vi = g_var_calc)
+dat <-
+  dat %>% 
+  select(cite, expt_num, same_infant, mean_age_1, yi, vi) %>% 
+  mutate(study_ref = paste(cite, expt_num, same_infant, sep=',')) %>% 
+  arrange(desc(yi))
+dat$se = sqrt(dat$vi)
+dat$lowerci = (-1.96*dat$se)+dat$yi
+dat$upperci = (1.96*dat$se)+dat$yi
+p2 =
+  ggplot(dat, aes(y=reorder(study_ref, -yi), x=yi, xmin=lowerci, xmax=upperci))+
+  geom_point(color = 'black')+
+  geom_errorbarh(height=.1)+
+  scale_x_continuous(limits=c(-1.5,1.5), name='Standardized Mean Difference (g)')+
+  ylab('Reference')+
+  geom_vline(xintercept=0, color='grey', linetype='dashed')+
+  geom_vline(xintercept=0.19, color='black', linetype='dashed')+
+  apatheme
+
+p2
+
+ggsave("figures/ForestPlot_All.pdf")
+
+#rma_all
+estimate = 0.0751
+se = 0.0557
+
+se.seq=seq(0, max(dat$se), 0.001)
+
+ll95 = estimate-(1.96*se.seq)
+ul95 = estimate+(1.96*se.seq)
+
+#You can do this for a 99% CI region too
+ll99 = estimate-(3.29*se.seq)
+ul99 = estimate+(3.29*se.seq)
+
+meanll95 = estimate-(1.96*se)
+meanul95 = estimate+(1.96*se)
+
+dfCI = data.frame(ll95, ul95, ll99, ul99, se.seq, estimate, meanll95, meanul95)
+
+#Now we can actually make the funnel plot.
+#Using your original data-frame, map standard error to your x-axis (for now) and Zr to your y-axis
+fp = ggplot(aes(x = se, y = yi), data = dat) +
+  #Regression line for the FP asymmetry
+  geom_smooth(aes(x = se, y = yi), method = "lm", colour = "darkgrey", alpha = .5, se = FALSE, data = dat) +
+  #Add your data-points to the scatterplot
+  geom_point(size = 2.5, colour="black") +
+  #Give the x- and y- axes informative labels
+  xlab('Standard Error') + ylab('Hedge\'s g')+
+  #Now using the 'dfCI' data-frame we created, plot dotted lines corresponding
+  #to the lower and upper limits of your 95% CI region
+  #And dashed lines corresponding to your 99% CI region
+  #Add lines corresponding to 0 and estimate
+  geom_line(aes(x = se.seq, y = 0), linetype = 'solid', data = dfCI) +
+  geom_line(aes(x = se.seq, y = estimate), linetype = 'dashed', data = dfCI) +
+  geom_line(aes(x = se.seq, y = ll95), linetype = 'dotted', data = dfCI) +
+  geom_line(aes(x = se.seq, y = ul95), linetype = 'dotted', data = dfCI) +
+#  geom_line(aes(x = se.seq, y = ll99), linetype = 'dashed', data = dfCI) +
+#  geom_line(aes(x = se.seq, y = ul99), linetype = 'dashed', data = dfCI) +
+  #Now plot dotted lines corresponding to the 95% CI of your meta-analytic estimate
+  #geom_segment(aes(x = min(se.seq), y = meanll95, xend = max(se.seq), yend = meanll95), linetype='dotted', data=dfCI) +
+  #geom_segment(aes(x = min(se.seq), y = meanul95, xend = max(se.seq), yend = meanul95), linetype='dotted', data=dfCI) +
+  #Reverse the x-axis ordering (se) so that the tip of the funnel will appear
+  #at the top of the figure once we swap the x- and y-axes...
+  scale_x_reverse()+
+  #Specify the range and interval for the tick-marks of the y-axis (Zr);
+  #Choose values that work for you based on your data
+  scale_y_continuous(breaks=seq(-.45,0.8,0.25))+
+  #And now we flip the axes so that SE is on y- and Zr is on x-
+  coord_flip()+
+  #Finally, apply my APA-format theme (see code at end of post).
+  #You could, alternatively, specify theme_bw() instead.
+  apatheme
+
+#Call the pretty funnel plot
+fp
+ggsave("figures/FunnelPlot_All.pdf")
+```
+
+
+```{r Figure2, echo=FALSE}
+
+p <- ggplot(db, aes(mean_age_1/30.44, g_calc, color = StimuliType))
+p + geom_point(aes(size = weights_g)) + 
+  geom_line(y= 0, linetype="dotted") + 
+  geom_smooth(method = "glm") + 
+  theme(text = element_text(size=16)) + 
+  xlab("Age in months") + 
+  ylab("Effect size Hedges' g") +
+  scale_color_grey() +
+  apatheme
+
+
+```
+
+
+## Moderators, with the whole data set
+
+
+#Age
+
+First age, now we have enough data to also look at the quadratic term. 
+```{r Ageall, echo = FALSE}
+#Center the age variable
+#db$age.C <- db$mean_age_1 - mean(db$mean_age_1, na.rm = TRUE)
+rma_age <- rma.mv(g_calc, g_var_calc, mods = age.C, data = db, random = ~ 1 | short_cite)
+
+summary(rma_age)
+
+#follow-up:quadratic term
+
+rma_age_q <- rma.mv(g_calc, g_var_calc, mods = age.C*(age.C^2), data = db, random = ~ 1 | short_cite)
+
+summary(rma_age_q)
+```
+
+#Stimulus Type
+
+```{r Stimall, echo = FALSE}
+# Look at Stimulus Type, first do a "typical" moderator test
+rma_stimuli=rma.mv(g_calc, g_var_calc, mods= ~factor(StimuliType), data=db, random = ~ 1|short_cite)
+summary(rma_stimuli)
+
+#Now remove intercept to see which subset is different from 0 
+rma_stimuli_1=rma.mv(g_calc, g_var_calc, mods= ~factor(StimuliType)-1, data=db, random = ~ 1|short_cite)
+summary(rma_stimuli_1)
+
+#Follow-up: Subsets, easier to interpret and write down, conclusions are the same as the previous analysis without intercept
+
+#artificial only, n=38
+rma_stimuli_subset0=rma.mv(g_calc, g_var_calc, data=db, subset = (StimuliType ==0), random = ~ 1|short_cite)
+summary(rma_stimuli_subset0)
+
+#natural only, n=30
+rma_stimuli_subset1=rma.mv(g_calc, g_var_calc, data=db, subset = (StimuliType ==1), random = ~ 1|short_cite)
+summary(rma_stimuli_subset1)
+
+
+```
+
+
+
+
+#Additional cues
+This requires a second thought. There are multiple experiments here that are intentionally testing whether additional cues supercede SL. This has been coded in two ways: cues that interfere with the TP structure, and cues that interfere with the Native language expectations. In many cases these will be the same (i.e. iambic stress interferes with the TP structure *because* it contradicts native language expectations).
+
+For clarity, we focus for now on TP cue conflicts. 
+
+``` {r Cues}
+# Look at additional cues
+rma_cue = rma.mv(g_calc, g_var_calc, mods = ~factor(cue_conflict_TP), data = db, random = ~1|short_cite)
+summary(rma_cue)
+
+# subset to the cues that are about stress
+db_cue_stress <-
+  db %>% 
+  filter(additional_cue %in% c("stress", "intensity", "duration", "prime, stress")) %>% 
+  mutate(additional_cue = factor(additional_cue)) %>% 
+  droplevels()
+
+rma_cue_stress = rma.mv(g_calc, g_var_calc, mods = ~factor(cue_conflict_TP), 
+                        data = db_cue_stress, 
+                        random = ~1|short_cite)
+summary(rma_cue_stress)
+
+dat <-
+  db %>% 
+  rename(cite = short_cite,
+         yi = g_calc,
+         vi = g_var_calc) %>% 
+  mutate(study_ref = paste(cite, expt_num, same_infant, sep=',')) %>% 
+  filter(cue_conflict_TP!= "")
+dat$se = sqrt(dat$vi)
+dat$lowerci = (-1.96*dat$se)+dat$yi
+dat$upperci = (1.96*dat$se)+dat$yi
+
+  ggplot(dat, aes(y=reorder(study_ref, -yi), x=yi, xmin=lowerci, xmax=upperci))+
+  geom_point(aes(color = cue_conflict_TP))+
+  geom_errorbarh(height=.1)+
+  scale_x_continuous(limits=c(-1.5,1.5), name='Standardized Mean Difference (g)')+
+  ylab('Reference')+
+  geom_vline(xintercept=0, color='grey', linetype='dashed')+
+  geom_vline(xintercept=0.31, color='black', linetype='dashed')
+  
+
+```
+
+
