@@ -349,7 +349,7 @@ p + geom_point(aes(size = weights_g)) +
   geom_smooth(method = "glm") + 
   theme(text = element_text(size=16)) + 
   xlab("Age in months") + 
-  ylab("Effect size Hedges' g") +
+  ylab("Effect size Hedge's g") +
   scale_color_grey() +
   apatheme
 
